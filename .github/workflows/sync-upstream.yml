@@ -2,11 +2,11 @@ name: Sync Fork with Upstream
 
 on:
   schedule:
-    - cron: '0 2 * * 0'  # Chaque dimanche à 2h du matin
+    - cron: '0 3 * * *'  # Tous les jours à 3h du matin (au lieu d'une fois par semaine)
   workflow_dispatch:  # Permet de lancer manuellement si besoin
 
 jobs:
-  sync:
+  check-and-sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -14,12 +14,62 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+          ref: master
 
-      - name: Sync upstream changes
+      - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/n8n-io/n8n.git
-          git fetch upstream
-          git merge upstream/master --no-edit --allow-unrelated-histories || true
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/n8n-io/n8n.git || true
+          git remote set-url upstream https://github.com/n8n-io/n8n.git
+
+      - name: Fetch upstream changes
+        run: git fetch upstream master
+
+      - name: Check for changes
+        id: check
+        run: |
+          # Comparer les commits
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/master)
+          
+          if [ "$LOCAL" = "$UPSTREAM" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "✅ Le fork est déjà à jour avec upstream"
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            # Compter les commits en retard
+            BEHIND=$(git rev-list --count HEAD..upstream/master)
+            echo "📊 Le fork est $BEHIND commit(s) en retard"
+          fi
+
+      - name: Merge upstream changes
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          echo "🔄 Synchronisation avec upstream..."
+          git merge upstream/master --no-edit --allow-unrelated-histories || {
+            echo "⚠️ Conflits détectés, tentative de résolution automatique..."
+            git merge --abort
+            git merge upstream/master -X theirs --no-edit || {
+              echo "❌ Échec de la fusion automatique, intervention manuelle requise"
+              exit 1
+            }
+          }
+
+      - name: Push changes
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
           git push origin master
+          echo "✅ Synchronisation terminée avec succès"
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ "${{ steps.check.outputs.has_changes }}" = "false" ]; then
+            echo "ℹ️ Aucune mise à jour nécessaire"
+          else
+            echo "✅ Fork synchronisé avec succès"
+          fi
